@@ -1,0 +1,4 @@
+logs
+data
+*.pyc
+__pycache__
