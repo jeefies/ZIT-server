@@ -1,5 +1,9 @@
 # ZIT-service API
 
+The existing Z-Image-Turbo API remains the default. Pony Diffusion is available as an extension through `model_family="pony"` on `POST /generate`, or through `POST /generate/pony`.
+
+Pony currently supports `mode="t2i"` only. Pony `i2i`/inpaint returns `501`; ZIT `i2i` remains unchanged.
+
 服务地址: `http://localhost:8765`
 
 ---
@@ -164,6 +168,7 @@ PNG 图片文件 (`Content-Type: image/png`)
 {
   "status": "healthy",
   "service": "z-image-turbo-queue",
+  "supported_model_families": ["pony", "zit"],
   "has_pending_tasks": false,
   "process_alive": true
 }
