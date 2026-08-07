@@ -1,9 +1,5 @@
 # ZIT-service API
 
-The existing Z-Image-Turbo API remains the default. Pony Diffusion is available as an extension through `model_family="pony"` on `POST /generate`, or through `POST /generate/pony`.
-
-Pony currently supports `mode="t2i"` only. Pony `i2i`/inpaint returns `501`; ZIT `i2i` remains unchanged.
-
 服务地址: `http://localhost:8765`
 
 ---
@@ -74,6 +70,91 @@ Pony currently supports `mode="t2i"` only. Pony `i2i`/inpaint returns `501`; ZIT
   "status": "failed",
   "mode": "i2i",
   "error": "i2i 任务需要提供 image_base64"
+}
+```
+
+---
+
+## POST /batch_generate
+
+批量提交图片生成任务。请求体可以是任务对象数组，也可以是包含 `"tasks"` 字段的对象。
+
+每项任务的字段与 `/generate` 保持一致。
+
+### Request (数组形式)
+
+```json
+[
+  {
+    "mode": "t2i",
+    "prompt": "a cat on a cushion",
+    "width": 1024,
+    "height": 1024,
+    "steps": 9,
+    "guidance": 0.0,
+    "seed": -1
+  },
+  {
+    "mode": "i2i",
+    "prompt": "add a hat",
+    "image_base64": "data:image/png;base64,xxx...",
+    "mask_base64": null,
+    "width": 1024,
+    "height": 1024,
+    "steps": 9,
+    "guidance": 0.0,
+    "seed": 42
+  }
+]
+```
+
+### Request (对象形式)
+
+```json
+{
+  "tasks": [
+    { "mode": "t2i", "prompt": "a cat", ... },
+    { "mode": "i2i", "prompt": "a dog", "image_base64": "...", ... }
+  ]
+}
+```
+
+### Response
+
+```json
+{
+  "results": [
+    {
+      "index": 0,
+      "task_id": "gen_20260617_011048_abc123",
+      "status": "queued",
+      "mode": "t2i",
+      "queue_position": 0,
+      "message": "任务已加入队列"
+    },
+    {
+      "index": 1,
+      "task_id": "gen_20260617_011049_def456",
+      "status": "queued",
+      "mode": "i2i",
+      "queue_position": 1,
+      "message": "任务已加入队列"
+    }
+  ],
+  "summary": {
+    "total": 2,
+    "queued": 2,
+    "completed": 0,
+    "failed": 0
+  }
+}
+```
+
+### Error Response (400)
+
+```json
+{
+  "error": "请求体必须是任务列表（JSON array），或包含 \"tasks\" 字段的 JSON 对象"
 }
 ```
 
@@ -168,7 +249,6 @@ PNG 图片文件 (`Content-Type: image/png`)
 {
   "status": "healthy",
   "service": "z-image-turbo-queue",
-  "supported_model_families": ["pony", "zit"],
   "has_pending_tasks": false,
   "process_alive": true
 }
