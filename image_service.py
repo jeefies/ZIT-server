@@ -305,6 +305,9 @@ class PipelineManager:
             pipe_log.write(f"\n--- Pipeline start (mode={mode}) at {datetime.now()} ---\n")
             pipe_log.flush()
             
+            env = os.environ.copy()
+            if mode in ('fl2va', 'ref2va'):
+                env['HF_ENDPOINT'] = 'https://hf-mirror.com'
             self.process = subprocess.Popen(
                 [python_bin, script, "--mode", mode],
                 stdin=subprocess.PIPE,
@@ -312,9 +315,21 @@ class PipelineManager:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                universal_newlines=True
+                universal_newlines=True,
+                env=env,
             )
             print(f"✅ Pipeline 启动 (PID: {self.process.pid}, mode={mode}, interpreter={python_bin})", file=sys.stderr)
+            
+            # 验证进程在启动后仍然存活
+            import time
+            time.sleep(0.5)
+            if self.process.poll() is not None:
+                print(f"❌ Pipeline 进程在启动后立即退出 (PID: {self.process.pid}, mode={mode})", file=sys.stderr)
+                self.process = None
+                self.current_type = None
+                self.pipeline_loaded = False
+                return False
+            
             return True
         except Exception as e:
             print(f"❌ Pipeline 启动失败: {e}", file=sys.stderr)
@@ -622,171 +637,252 @@ class TaskProcessor:
 app = Flask(__name__)
 task_processor = TaskProcessor()
 
-# ─── ZIT 原有端点 ─────────────────────────────────
+def _check_process_health():
+    """Check if the pipeline process is alive and reset state if dead."""
+    pm = task_processor.pipeline_manager
+    if pm.process is not None and pm.process.poll() is not None:
+        pm.pipeline_loaded = False
+        pm.current_type = None
+        pm.busy = False
+        pm.process = None
+        print(f"🔍 健康检查发现 pipeline 进程已死亡，状态已重置", file=sys.stderr)
 
-def _submit_generation(family_override=None):
-    data = request.get_json(silent=True) or {}
-    task_id = f"gen_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+# ─── 统一 API ─────────────────────────────────────
 
-    try:
-        family = normalize_model_family(family_override or data.get('model_family'))
-    except ValueError as e:
-        return jsonify({'task_id': task_id, 'status': 'failed', 'error': str(e)}), 400
+WORKFLOW_MAP = {
+    't2i':   {'family': 'zit', 'mode': 't2i',   'task': 't2i'},
+    'i2i':   {'family': 'zit', 'mode': 'i2i',   'task': 'i2i'},
+    't2va':  {'family': 'mh3', 'mode': 'fl2va', 'task': 't2va'},
+    'fl2va': {'family': 'mh3', 'mode': 'fl2va', 'task': 'fl2va'},
+    'ref2va':{'family': 'mh3', 'mode': 'ref2va','task': 'ref2va'},
+}
 
-    mode = data.get('mode', 't2i')
-    if family == 'pony' and mode != 't2i':
-        return jsonify({
-            'task_id': task_id,
-            'status': 'failed',
-            'mode': mode,
-            'model_family': family,
-            'error': 'Only t2i is implemented for Pony. ZIT i2i remains available through model_family=zit.'
-        }), 501
-
-    defaults = defaults_for_family(family)
-    task_data = {
-        'task_id': task_id,
-        'mode': mode,
-        'prompt': data.get('prompt', ''),
-        'negative_prompt': data.get('negative_prompt', defaults['negative_prompt']),
-        'width': data.get('width', defaults['width']),
-        'height': data.get('height', defaults['height']),
-        'steps': data.get('steps', defaults['steps']),
-        'guidance': data.get('guidance', defaults['guidance']),
-        'strength': data.get('strength', defaults['strength']),
-        'clip_skip': data.get('clip_skip', defaults['clip_skip']),
-        'model_family': family,
-        'model_id': model_id_for_family(family),
-        'seed': data.get('seed', -1),
-        'image_base64': data.get('image_base64'),
-        'mask_base64': data.get('mask_base64'),
+def _public_task(task_data):
+    """Build a public-facing task response from a DB record."""
+    mode = task_data.get('mode', task_data.get('workflow', 't2i'))
+    workflow_label = {
+        't2i': 't2i', 'i2i': 'i2i',
+        'fl2va': 't2va', 'ref2va': 'ref2va',
+    }
+    workflow = workflow_label.get(mode, mode)
+    return {
+        'id': task_data['task_id'],
+        'workflow': workflow,
+        'status': task_data.get('status', 'queued'),
+        'created_at': task_data.get('created_at'),
+        'completed_at': task_data.get('completed_at'),
+        'error': task_data.get('error'),
+        'outputs': _output_urls(task_data),
     }
 
-    result = task_processor.add_task(task_data)
-    return jsonify(result)
+def _output_urls(task_data):
+    """Build output URLs for a completed task."""
+    urls = {}
+    mode = task_data.get('mode', '')
+    tid = task_data['task_id']
+    if mode in ('t2i', 'i2i'):
+        urls['image'] = f"/v1/tasks/{tid}/output?type=image"
+    if mode in ('fl2va', 'ref2va'):
+        if task_data.get('video_path'):
+            urls['video'] = f"/v1/tasks/{tid}/output?type=video"
+        if task_data.get('audio_path'):
+            urls['audio'] = f"/v1/tasks/{tid}/output?type=audio"
+    return urls
 
-@app.route('/generate', methods=['POST'])
-def generate():
-    return _submit_generation()
+@app.route('/v1/tasks', methods=['POST'])
+def submit_task():
+    _check_process_health()
+    data = request.get_json(silent=True) or {}
+    workflow = data.get('workflow', 't2i')
 
-@app.route('/generate/pony', methods=['POST'])
-def generate_pony():
-    return _submit_generation('pony')
+    if workflow not in WORKFLOW_MAP:
+        return jsonify({'error': f"Unsupported workflow: {workflow}. Supported: {', '.join(WORKFLOW_MAP.keys())}"}), 400
 
-@app.route('/batch_generate', methods=['POST'])
-def batch_generate():
-    raw = request.get_json()
+    wf = WORKFLOW_MAP[workflow]
+    family = wf['family']
+    mode = wf['mode']
+    task_type = wf['task']
 
-    if isinstance(raw, list):
-        tasks = raw
-    elif isinstance(raw, dict):
-        tasks = raw.get('tasks')
-    else:
-        tasks = None
+    task_id = f"gen_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
-    if not isinstance(tasks, list):
-        return jsonify({
-            'error': '请求体必须是任务列表（JSON array），或包含 "tasks" 字段的 JSON 对象'
-        }), 400
-
-    results = []
-    queued_count = 0
-    completed_count = 0
-    failed_count = 0
-
-    for idx, item in enumerate(tasks):
-        if not isinstance(item, dict):
-            results.append({'index': idx, 'status': 'failed', 'error': '任务项必须是 JSON 对象'})
-            failed_count += 1
-            continue
-
-        task_id = f"gen_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-        try:
-            family = normalize_model_family(item.get('model_family'))
-        except ValueError as e:
-            results.append({'index': idx, 'task_id': task_id, 'status': 'failed', 'error': str(e)})
-            failed_count += 1
-            continue
-
-        mode = item.get('mode', 't2i')
-        if family == 'pony' and mode != 't2i':
-            results.append({'index': idx, 'task_id': task_id, 'status': 'failed', 'mode': mode,
-                           'model_family': family, 'error': 'Only t2i is implemented for Pony.'})
-            failed_count += 1
-            continue
-
+    if family in ('zit', 'pony'):
         defaults = defaults_for_family(family)
         task_data = {
             'task_id': task_id,
+            'workflow': workflow,
             'mode': mode,
-            'prompt': item.get('prompt', ''),
-            'negative_prompt': item.get('negative_prompt', defaults['negative_prompt']),
-            'width': item.get('width', defaults['width']),
-            'height': item.get('height', defaults['height']),
-            'steps': item.get('steps', defaults['steps']),
-            'guidance': item.get('guidance', defaults['guidance']),
-            'strength': item.get('strength', defaults['strength']),
-            'clip_skip': item.get('clip_skip', defaults['clip_skip']),
+            'task': task_type,
+            'prompt': data.get('prompt', ''),
+            'negative_prompt': data.get('negative_prompt', defaults['negative_prompt']),
+            'width': data.get('width', defaults['width']),
+            'height': data.get('height', defaults['height']),
+            'steps': data.get('steps', defaults['steps']),
+            'guidance': data.get('guidance', defaults['guidance']),
+            'strength': data.get('strength', defaults['strength']),
+            'clip_skip': data.get('clip_skip', defaults['clip_skip']),
             'model_family': family,
             'model_id': model_id_for_family(family),
-            'seed': item.get('seed', -1),
-            'image_base64': item.get('image_base64'),
-            'mask_base64': item.get('mask_base64'),
+            'seed': data.get('seed', -1),
+            'image_base64': data.get('image_base64'),
+            'mask_base64': data.get('mask_base64'),
+        }
+    else:
+        # mh3
+        task_data = {
+            'task_id': task_id,
+            'workflow': workflow,
+            'mode': mode,
+            'task': task_type,
+            'prompt': data.get('prompt', ''),
+            'conditions': data.get('conditions', []),
+            'target': data.get('target', {}),
+            'seed': data.get('seed', -1),
+            'callback_url': f"http://127.0.0.1:8765/task_complete",
+            'created_at': datetime.now().isoformat(),
         }
 
-        try:
-            result = task_processor.add_task(task_data)
-        except Exception as e:
-            result = {'task_id': task_id, 'status': 'failed', 'mode': task_data['mode'], 'error': f'提交任务异常: {str(e)}'}
+    result = task_processor.add_task(task_data)
 
-        result['index'] = idx
-        results.append(result)
+    if result.get('status') == 'completed':
+        task_record = task_processor.get_task(task_id)
+        resp = _public_task(task_record)
+        return jsonify(resp), 200
+    else:
+        resp = {
+            'id': task_id,
+            'workflow': workflow,
+            'status': 'queued',
+            'created_at': datetime.now().isoformat(),
+            'queue_position': result.get('queue_position', 0),
+        }
+        return jsonify(resp), 202
 
-        status = result.get('status')
-        if status == 'failed':
-            failed_count += 1
-        elif status == 'completed':
-            completed_count += 1
-        else:
-            queued_count += 1
+@app.route('/v1/tasks/<task_id>', methods=['GET'])
+def get_task(task_id):
+    _check_process_health()
+    task = task_processor.get_task(task_id)
+    if not task:
+        return jsonify({'error': 'Task not found'}), 404
+    return jsonify(_public_task(task))
 
+@app.route('/v1/tasks/<task_id>/output', methods=['GET'])
+def get_task_output(task_id):
+    task = task_processor.get_task(task_id)
+    if not task:
+        return jsonify({'error': 'Task not found'}), 404
+    if task.get('status') != 'completed':
+        return jsonify({'error': f'Task status is {task["status"]}, not completed'}), 400
+
+    output_type = request.args.get('type', 'image')
+    mode = task.get('mode', '')
+
+    if output_type == 'image':
+        image_path = task.get('image_path')
+        if image_path and os.path.exists(image_path):
+            return send_file(image_path, mimetype='image/png')
+        alt_path = os.path.join(IMAGE_OUTPUT_DIR, f"{task_id}.png")
+        if os.path.exists(alt_path):
+            return send_file(alt_path, mimetype='image/png')
+        return jsonify({'error': 'Image not found'}), 404
+
+    elif output_type == 'video':
+        video_path = task.get('video_path')
+        if video_path and os.path.exists(video_path):
+            return send_file(video_path, mimetype='video/mp4')
+        frames_dir = os.path.join(MH3_VIDEO_OUTPUT_DIR, task_id)
+        if os.path.isdir(frames_dir):
+            import zipfile, io
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, 'w') as zf:
+                for f in sorted(os.listdir(frames_dir)):
+                    zf.write(os.path.join(frames_dir, f), f)
+            buf.seek(0)
+            return send_file(buf, mimetype='application/zip', as_attachment=True,
+                             download_name=f"{task_id}_frames.zip")
+        return jsonify({'error': 'Video not found'}), 404
+
+    elif output_type == 'audio':
+        audio_path = task.get('audio_path')
+        if audio_path and os.path.exists(audio_path):
+            return send_file(audio_path, mimetype='audio/wav')
+        return jsonify({'error': 'Audio not found'}), 404
+
+    return jsonify({'error': f'Unsupported output type: {output_type}'}), 400
+
+@app.route('/v1/workflows', methods=['GET'])
+def list_workflows():
     return jsonify({
-        'results': results,
-        'summary': {'total': len(tasks), 'queued': queued_count, 'completed': completed_count, 'failed': failed_count}
+        'workflows': [
+            {'id': 't2i',   'name': 'Text-to-Image',    'family': 'zit'},
+            {'id': 'i2i',   'name': 'Image-to-Image',    'family': 'zit'},
+            {'id': 't2va',  'name': 'Text-to-Video',     'family': 'mh3'},
+            {'id': 'fl2va', 'name': 'First/Last-to-Video','family': 'mh3'},
+            {'id': 'ref2va','name': 'Reference-to-Video', 'family': 'mh3'},
+        ]
     })
 
-@app.route('/status/<task_id>', methods=['GET'])
-def get_status(task_id):
-    task = task_processor.get_task(task_id)
-    if task:
-        return jsonify(task)
-    return jsonify({'error': 'Task not found'}), 404
-
-@app.route('/queue/status', methods=['GET'])
-def queue_status():
+@app.route('/v1/queue', methods=['GET'])
+def get_queue():
+    _check_process_health()
     return jsonify(task_processor.get_queue_status())
 
-@app.route('/health', methods=['GET'])
-def health():
+@app.route('/v1/health', methods=['GET'])
+def health_v1():
+    _check_process_health()
     status = task_processor.get_queue_status()
     pm = task_processor.pipeline_manager
     total_pending = status['t2i_queue_length'] + status['i2i_queue_length'] + status['fl2va_queue_length'] + status['ref2va_queue_length']
     return jsonify({
         'status': 'healthy',
         'service': 'unified-image-video-service',
-        'default_model_family': DEFAULT_MODEL_FAMILY,
-        'supported_model_families': sorted(SUPPORTED_MODEL_FAMILIES),
-        'pony_model_id': PONY_MODEL_ID,
         'has_pending_tasks': total_pending > 0,
         'process_alive': pm.process is not None and pm.process.poll() is None,
         'current_mode': pm.current_type,
     })
 
-@app.route('/task_complete', methods=['POST'])
-def task_complete():
-    result = request.json
-    task_processor.update_task_status(result)
-    return jsonify({'success': True})
+# ─── 旧端点（保留兼容） ────────────────────────────
+
+@app.route('/generate', methods=['POST'])
+def generate():
+    _check_process_health()
+    data = request.get_json(silent=True) or {}
+    data['workflow'] = data.get('workflow', data.get('mode', 't2i'))
+    return submit_task()
+
+@app.route('/status/<task_id>', methods=['GET'])
+def get_status(task_id):
+    return get_task(task_id)
+
+@app.route('/status/<task_id>/image', methods=['GET'])
+def get_task_image(task_id):
+    return get_task_output(task_id)
+
+@app.route('/v1/videos', methods=['POST'])
+def generate_video():
+    _check_process_health()
+    data = request.get_json(force=True) or {}
+    task_type = data.get("task", "t2va")
+    wf_map = {'t2va': 't2va', 'fl2va': 'fl2va', 'ref2va': 'ref2va'}
+    if task_type not in wf_map:
+        return jsonify({"error": f"Unsupported task: {task_type}"}), 400
+    data['workflow'] = wf_map[task_type]
+    return submit_task()
+
+@app.route('/v1/videos/<task_id>', methods=['GET'])
+def get_video_task(task_id):
+    return get_task(task_id)
+
+@app.route('/v1/videos/<task_id>/content', methods=['GET'])
+def get_video_content(task_id):
+    return get_task_output(task_id)
+
+@app.route('/v1/videos/<task_id>/audio', methods=['GET'])
+def get_video_audio(task_id):
+    return get_task_output(task_id)
+
+@app.route('/queue/status', methods=['GET'])
+def queue_status():
+    return get_queue()
 
 @app.route('/history', methods=['GET'])
 def get_history():
@@ -801,17 +897,17 @@ def get_history():
     limit = int(request.args.get('limit', 0))
     return jsonify(result[:limit] if limit > 0 else result)
 
-@app.route('/status/<task_id>/image', methods=['GET'])
-def get_task_image(task_id):
-    task = task_processor.get_task(task_id)
-    if not task:
-        return jsonify({'error': 'Task not found'}), 404
-    if task['status'] != 'completed':
-        return jsonify({'error': 'Image not ready'}), 400
-    image_path = os.path.join(IMAGE_OUTPUT_DIR, f"{task_id}.png")
-    if not os.path.exists(image_path):
-        return jsonify({'error': 'Image file not found'}), 404
-    return send_file(image_path, mimetype='image/png')
+@app.route('/health', methods=['GET'])
+def health():
+    return health_v1()
+
+# ─── 内部端点 ─────────────────────────────────────
+
+@app.route('/task_complete', methods=['POST'])
+def task_complete():
+    result = request.json
+    task_processor.update_task_status(result)
+    return jsonify({'success': True})
 
 @app.route('/pipeline_status', methods=['POST'])
 def update_pipeline_status():
@@ -841,6 +937,23 @@ def pipeline_free():
     pm.free_pipeline()
     return jsonify({'status': 'freed', 'message': 'Pipeline 已释放'})
 
+@app.route('/pipeline_reset', methods=['POST'])
+def pipeline_reset():
+    pm = task_processor.pipeline_manager
+    if pm.process:
+        try:
+            pm.process.stdin.close()
+            pm.process.wait(timeout=10)
+        except Exception:
+            pm.process.kill()
+        pm.process = None
+    pm.pipeline_loaded = False
+    pm.current_type = None
+    pm.busy = False
+    pm.last_activity = datetime.now()
+    print(f"🔧 Pipeline 已强制重置", file=sys.stderr)
+    return jsonify({'status': 'reset', 'message': 'Pipeline 已强制重置'})
+
 @app.route('/pipeline_status', methods=['GET'])
 def get_pipeline_status():
     pm = task_processor.pipeline_manager
@@ -856,94 +969,6 @@ def get_pipeline_status():
 def __restart_all_tasks():
     task_processor.restart_interrupted_tasks()
     return jsonify({"restart": "now"})
-
-# ─── MH3 端点 ────────────────────────────────────
-
-@app.route('/v1/videos', methods=['POST'])
-def generate_video():
-    data = request.get_json(force=True)
-    if not data:
-        return jsonify({"error": "Invalid JSON body"}), 400
-
-    task_type = data.get("task", "t2va")
-    if task_type not in ("t2va", "fl2va", "ref2va"):
-        return jsonify({"error": f"Unsupported task: {task_type}. Supported: t2va, fl2va, ref2va"}), 400
-
-    mode = _mode_for_task(task_type)
-    task_id = f"mh3_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-
-    task_data = {
-        'task_id': task_id,
-        'task': task_type,
-        'mode': mode,
-        'prompt': data.get('prompt', ''),
-        'conditions': data.get('conditions', []),
-        'target': data.get('target', {}),
-        'seed': data.get('seed', -1),
-        'callback_url': f"http://127.0.0.1:8765/task_complete",
-        'created_at': datetime.now().isoformat(),
-    }
-
-    result = task_processor.add_task(task_data)
-
-    # 统一响应格式为 MH3 风格
-    if result.get('status') == 'queued':
-        return jsonify({"id": task_id, "status": "queued"}), 202
-    elif result.get('status') == 'completed':
-        return jsonify({"id": task_id, "status": "completed"}), 200
-    else:
-        return jsonify({"id": task_id, "status": result.get('status', 'failed'), "error": result.get('error')}), 400
-
-@app.route('/v1/videos/<task_id>', methods=['GET'])
-def get_video_task(task_id):
-    t = task_processor.get_task(task_id)
-    if not t:
-        return jsonify({"error": "Task not found"}), 404
-
-    return jsonify({
-        "id": t["task_id"],
-        "status": t.get("status", "unknown"),
-        "task": t.get("task"),
-        "created_at": t.get("created_at"),
-        "completed_at": t.get("completed_at"),
-        "error": t.get("error"),
-    })
-
-@app.route('/v1/videos/<task_id>/content', methods=['GET'])
-def get_video_content(task_id):
-    t = task_processor.get_task(task_id)
-    if not t:
-        return jsonify({"error": "Task not found"}), 404
-    if t.get("status") != "completed":
-        return jsonify({"error": f"Task status is {t.get('status')}, not completed"}), 400
-
-    video_path = t.get("video_path")
-    if video_path and os.path.exists(video_path):
-        return send_file(video_path, mimetype="video/mp4")
-
-    frames_dir = os.path.join(MH3_VIDEO_OUTPUT_DIR, task_id)
-    if os.path.isdir(frames_dir):
-        import zipfile
-        import io
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w") as zf:
-            for f in sorted(os.listdir(frames_dir)):
-                zf.write(os.path.join(frames_dir, f), f)
-        buf.seek(0)
-        return send_file(buf, mimetype="application/zip", as_attachment=True,
-                         download_name=f"{task_id}_frames.zip")
-
-    return jsonify({"error": "No video file found"}), 404
-
-@app.route('/v1/videos/<task_id>/audio', methods=['GET'])
-def get_video_audio(task_id):
-    t = task_processor.get_task(task_id)
-    if not t:
-        return jsonify({"error": "Task not found"}), 404
-    audio_path = t.get("audio_path")
-    if audio_path and os.path.exists(audio_path):
-        return send_file(audio_path, mimetype="audio/wav")
-    return jsonify({"error": "No audio file found"}), 404
 
 
 # ==================== 主程序 ====================

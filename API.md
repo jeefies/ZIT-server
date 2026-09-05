@@ -1,18 +1,23 @@
-# ZIT-service API
+# ZIT-service Unified API
 
 服务地址: `http://localhost:8765`
 
+当前支持 2 种 workflow: `t2i`, `i2i`。
+
+> **注意**：`t2va`, `fl2va`, `ref2va` 已暂时 deprecated。
+> 原因：当前机器 30 GB 内存无法加载 MiniMax-H3 INT4 量化模型。
+
 ---
 
-## POST /generate
+## POST /v1/tasks
 
-提交图片生成任务。
+提交任意类型的生成任务。
 
 ### Request
 
 ```json
 {
-  "mode": "t2i",
+  "workflow": "t2i",
   "prompt": "a cat on a cushion",
   "negative_prompt": "blurry, low quality",
   "width": 1024,
@@ -21,168 +26,74 @@
   "guidance": 0.0,
   "seed": -1,
   "image_base64": null,
-  "mask_base64": null
+  "mask_base64": null,
+  "conditions": [],
+  "target": {}
 }
 ```
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| mode | string | `"t2i"` | 生成模式: `t2i` (文生图) 或 `i2i` (图生图) |
+| workflow | string | `"t2i"` | 生成模式: `t2i`, `i2i`（`t2va`/`fl2va`/`ref2va` 已禁用） |
 | prompt | string | `""` | 正向提示词 |
-| negative_prompt | string | `""` | 负向提示词 (不希望出现的内容) |
-| width | int | `1024` | 图片宽度 |
-| height | int | `1024` | 图片高度 |
-| steps | int | `9` | 推理步数 |
-| guidance | float | `0.0` | CFG guidance scale |
+| negative_prompt | string | `""` | 负向提示词 (仅 ZIT/Pony) |
+| width | int | `1024` | 图片/视频宽度 (仅 ZIT/Pony) |
+| height | int | `1024` | 图片/视频高度 (仅 ZIT/Pony) |
+| steps | int | `9` | 推理步数 (仅 ZIT/Pony) |
+| guidance | float | `0.0` | CFG guidance scale (仅 ZIT/Pony) |
 | seed | int | `-1` | 随机种子, `-1` 为随机生成 |
-| image_base64 | string | `null` | i2i 模式必需, 输入原图 base64 (支持 `data:image/png;base64,xxx` 格式) |
-| mask_base64 | string | `null` | i2i 掩码 base64, 白=重绘区域, 黑=保留区域; 不提供则全图重绘 |
+| image_base64 | string | `null` | i2i 模式必需, 输入原图 base64 |
+| mask_base64 | string | `null` | i2i 掩码 base64 |
+| conditions | array | `[]` | 已禁用 |
+| target | object | `{}` | 已禁用 |
 
-### Response (缓存命中)
-
-```json
-{
-  "task_id": "gen_20260617_011048_ceb6ab",
-  "status": "completed",
-  "mode": "t2i",
-  "message": "缓存命中：复用已完成任务 gen_xxx",
-  "image_path": "/images/gen_xxx.png"
-}
-```
-
-### Response (加入队列)
+### Response (202 queued)
 
 ```json
 {
-  "task_id": "gen_20260617_011048_ceb6ab",
+  "id": "gen_20260617_011048_ceb6ab",
+  "workflow": "t2va",
   "status": "queued",
-  "mode": "t2i",
-  "queue_position": 0,
-  "message": "任务已加入队列"
+  "created_at": "2026-06-17T01:10:48",
+  "queue_position": 0
 }
 ```
 
-### Response (i2i 参数错误)
+### Response (200 completed, cache hit)
 
 ```json
 {
-  "task_id": "gen_xxx",
-  "status": "failed",
-  "mode": "i2i",
-  "error": "i2i 任务需要提供 image_base64"
-}
-```
-
----
-
-## POST /batch_generate
-
-批量提交图片生成任务。请求体可以是任务对象数组，也可以是包含 `"tasks"` 字段的对象。
-
-每项任务的字段与 `/generate` 保持一致。
-
-### Request (数组形式)
-
-```json
-[
-  {
-    "mode": "t2i",
-    "prompt": "a cat on a cushion",
-    "width": 1024,
-    "height": 1024,
-    "steps": 9,
-    "guidance": 0.0,
-    "seed": -1
-  },
-  {
-    "mode": "i2i",
-    "prompt": "add a hat",
-    "image_base64": "data:image/png;base64,xxx...",
-    "mask_base64": null,
-    "width": 1024,
-    "height": 1024,
-    "steps": 9,
-    "guidance": 0.0,
-    "seed": 42
-  }
-]
-```
-
-### Request (对象形式)
-
-```json
-{
-  "tasks": [
-    { "mode": "t2i", "prompt": "a cat", ... },
-    { "mode": "i2i", "prompt": "a dog", "image_base64": "...", ... }
-  ]
-}
-```
-
-### Response
-
-```json
-{
-  "results": [
-    {
-      "index": 0,
-      "task_id": "gen_20260617_011048_abc123",
-      "status": "queued",
-      "mode": "t2i",
-      "queue_position": 0,
-      "message": "任务已加入队列"
-    },
-    {
-      "index": 1,
-      "task_id": "gen_20260617_011049_def456",
-      "status": "queued",
-      "mode": "i2i",
-      "queue_position": 1,
-      "message": "任务已加入队列"
-    }
-  ],
-  "summary": {
-    "total": 2,
-    "queued": 2,
-    "completed": 0,
-    "failed": 0
-  }
-}
-```
-
-### Error Response (400)
-
-```json
-{
-  "error": "请求体必须是任务列表（JSON array），或包含 \"tasks\" 字段的 JSON 对象"
-}
-```
-
----
-
-## GET /status/:task_id
-
-查询任务详情。
-
-### Response
-
-```json
-{
-  "task_id": "gen_20260617_011048_ceb6ab",
-  "mode": "t2i",
-  "prompt": "a cat on a cushion",
-  "negative_prompt": "blurry, low quality",
-  "width": 1024,
-  "height": 1024,
-  "steps": 9,
-  "guidance": 0.0,
-  "seed": 42,
+  "id": "gen_20260617_011048_ceb6ab",
+  "workflow": "t2i",
   "status": "completed",
-  "image_path": "/images/gen_20260617_011048_ceb6ab.png",
-  "created_at": "2026-06-17T01:10:48.271551",
-  "completed_at": "2026-06-17T01:11:41.837321",
+  "created_at": "2026-06-17T01:10:48",
+  "completed_at": "2026-06-17T01:11:41",
   "error": null,
-  "error_type": null
+  "outputs": {
+    "image": "/v1/tasks/gen_20260617_011048_ceb6ab/output?type=image"
+  }
+}
+```
+
+---
+
+## GET /v1/tasks/:id
+
+查询任务状态。
+
+### Response
+
+```json
+{
+  "id": "gen_20260617_011048_ceb6ab",
+  "workflow": "t2i",
+  "status": "completed",
+  "created_at": "2026-06-17T01:10:48",
+  "completed_at": "2026-06-17T01:11:41",
+  "error": null,
+  "outputs": {
+    "image": "/v1/tasks/gen_20260617_011048_ceb6ab/output?type=image"
+  }
 }
 ```
 
@@ -196,31 +107,49 @@
 
 ---
 
-## GET /status/:task_id/image
+## GET /v1/tasks/:id/output
 
-下载生成的图片 (PNG)。
+下载生成的文件。
 
-### 条件
+### Query Parameters
 
-- 任务状态必须为 `completed`
-- 图片文件必须存在
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| type | string | `"image"` | 输出类型: `image`（`video`/`audio` 已禁用） |
 
 ### Response
 
-PNG 图片文件 (`Content-Type: image/png`)
+- `type=image`: PNG 图片 (`Content-Type: image/png`)
 
 ### Error Response
 
 | 状态码 | 说明 |
 |--------|------|
-| 404 | 任务不存在或图片文件不存在 |
-| 400 | 任务未完成 (`Image not ready`) |
+| 404 | 任务不存在或文件不存在 |
+| 400 | 任务未完成或类型不支持 |
 
 ---
 
-## GET /queue/status
+## GET /v1/workflows
 
-查询任务队列状态。
+列出可用 workflow。
+
+### Response
+
+```json
+{
+  "workflows": [
+    {"id": "t2i",   "name": "Text-to-Image",    "family": "zit"},
+    {"id": "i2i",   "name": "Image-to-Image",    "family": "zit"}
+  ]
+}
+```
+
+---
+
+## GET /v1/queue
+
+查询队列状态。
 
 ### Response
 
@@ -232,14 +161,18 @@ PNG 图片文件 (`Content-Type: image/png`)
   "pipeline_switching": false,
   "t2i_queue_length": 0,
   "i2i_queue_length": 1,
+  "fl2va_queue_length": 0,
+  "ref2va_queue_length": 0,
   "t2i_queue": [],
-  "i2i_queue": ["gen_yyy"]
+  "i2i_queue": ["gen_yyy"],
+  "fl2va_queue": [],
+  "ref2va_queue": []
 }
 ```
 
 ---
 
-## GET /health
+## GET /v1/health
 
 健康检查。
 
@@ -248,19 +181,29 @@ PNG 图片文件 (`Content-Type: image/png`)
 ```json
 {
   "status": "healthy",
-  "service": "z-image-turbo-queue",
+  "service": "unified-image-video-service",
   "has_pending_tasks": false,
-  "process_alive": true
+  "process_alive": true,
+  "current_mode": "t2i"
 }
 ```
 
 ---
 
+## 内部端点 (不对外暴露)
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | /task_complete | Pipeline 子进程回调 |
+| POST | /pipeline_status | Pipeline 加载/卸载状态回调 |
+| POST | /pipeline_free | 手动释放 pipeline 进程和 GPU 显存 |
+| POST | /pipeline_reset | 强制重置 pipeline 状态 (卡死恢复) |
+| GET | /pipeline_status | 查询 pipeline 状态 |
+| GET | /__restart | 重启被中断任务 |
+
+---
+
 ## GET /pipeline_status
-
-查询 pipeline 状态。
-
-### Response
 
 ```json
 {
@@ -272,87 +215,21 @@ PNG 图片文件 (`Content-Type: image/png`)
 }
 ```
 
-| 字段 | 说明 |
-|------|------|
-| current_type | 当前 pipeline 模式: `t2i` / `i2i` / `null` |
-| pipeline_loaded | 模型是否已加载完成 |
-| busy | pipeline 是否正在处理任务 |
-| process_alive | 子进程是否存活 |
-| last_activity | 最后活动时间 (ISO 8601) |
-
 ---
 
-## POST /pipeline_free
+## 向后兼容端点
 
-手动释放 pipeline 进程和 GPU 显存。pipeline 空闲后下次任务会自动重新加载。
+以下旧端点保留，但新代码应使用 `/v1/*` 端点:
 
-### Response (已释放)
-
-```json
-{"status": "freed", "message": "Pipeline 已释放"}
-```
-
-### Response (未运行)
-
-```json
-{"status": "already_free", "message": "Pipeline 未运行"}
-```
-
----
-
-## GET /history
-
-查询所有任务历史 (仅 task_id + status)。
-
-### Query Parameters
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| limit | int | `0` | 返回数量限制, `0` 为不限制 |
-
-### Response
-
-```json
-[
-  {"task_id": "gen_20260617_011048_ceb6ab", "status": "completed"},
-  {"task_id": "gen_20260617_015851_f3bbb6", "status": "completed"}
-]
-```
-
-按 task_id 倒序排列。
-
----
-
-## POST /task_complete
-
-Pipeline 子进程内部回调端点，用于通知主进程任务完成。**外部调用者不应直接使用此端点。**
-
-### Request
-
-```json
-{
-  "task_id": "gen_xxx",
-  "status": "success",
-  "mode": "t2i",
-  "image_path": "/images/gen_xxx.png",
-  "completed_at": "2026-06-17T01:11:41.837321"
-}
-```
-
----
-
-## POST /pipeline_status
-
-Pipeline 子进程内部回调端点，用于通知主进程 pipeline 加载/卸载状态。**外部调用者不应直接使用此端点。**
-
----
-
-## GET /__restart
-
-重启所有 interrupted (processing/queued) 任务。服务启动时自动调用。
-
-### Response
-
-```json
-{"restart": "now"}
-```
+| 方法 | 路径 | 新端点 |
+|------|------|--------|
+| POST | /generate | POST /v1/tasks |
+| GET | /status/:id | GET /v1/tasks/:id |
+| GET | /status/:id/image | GET /v1/tasks/:id/output?type=image |
+| GET | /queue/status | GET /v1/queue |
+| GET | /health | GET /v1/health |
+| POST | /v1/videos | ~~POST /v1/tasks~~（已禁用） |
+| GET | /v1/videos/:id | ~~GET /v1/tasks/:id~~（已禁用） |
+| GET | /v1/videos/:id/content | ~~GET /v1/tasks/:id/output?type=video~~（已禁用） |
+| GET | /v1/videos/:id/audio | ~~GET /v1/tasks/:id/output?type=audio~~（已禁用） |
+| GET | /history | — (无替代) |
