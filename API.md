@@ -233,3 +233,71 @@
 | GET | /v1/videos/:id/content | ~~GET /v1/tasks/:id/output?type=video~~（已禁用） |
 | GET | /v1/videos/:id/audio | ~~GET /v1/tasks/:id/output?type=audio~~（已禁用） |
 | GET | /history | — (无替代) |
+
+## i2i 接入说明
+
+`i2i`（Image-to-Image）基于 `ZImageInpaintPipeline`，需要提供输入图片和可选的掩码。
+
+### 请求示例
+
+```bash
+curl -X POST http://localhost:8765/v1/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workflow": "i2i",
+    "prompt": "a small red cube on a wooden table",
+    "image_base64": "<BASE64_PNG>",
+    "mask_base64": "<BASE64_PNG_OR_NULL>",
+    "width": 512,
+    "height": 512,
+    "steps": 4,
+    "guidance": 0.0,
+    "seed": 42
+  }'
+```
+
+### 参数说明
+
+| 参数 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| `workflow` | string | 是 | 固定为 `"i2i"` |
+| `prompt` | string | 是 | 正向提示词 |
+| `image_base64` | string | 是 | 输入原图，Base64 编码的 PNG |
+| `mask_base64` | string | 否 | 掩码图，Base64 编码的 PNG；不传则默认全图重绘 |
+| `width` | int | 否 | 输出宽度，默认 `512` |
+| `height` | int | 否 | 输出高度，默认 `512` |
+| `steps` | int | 否 | 推理步数，默认 `4` |
+| `guidance` | float | 否 | CFG scale，默认 `0.0` |
+| `seed` | int | 否 | 随机种子，`-1` 为随机 |
+
+### 掩码约定
+
+- **白色 (255)** = 重绘区域
+- **黑色 (0)** = 保留区域
+- 未提供 `mask_base64` 时，服务端自动生成全白掩码，等价于全图重绘
+
+### 响应
+
+任务创建成功返回 `202`：
+
+```json
+{
+  "id": "gen_20260906_001020_e7a399",
+  "workflow": "i2i",
+  "status": "queued",
+  "created_at": "2026-09-06T00:10:20",
+  "queue_position": 0
+}
+```
+
+完成后查询：
+
+```bash
+curl http://localhost:8765/v1/tasks/gen_20260906_001020_e7a399
+```
+
+下载图片：
+
+```bash
+curl http://localhost:8765/v1/tasks/gen_20260906_001020_e7a399/output?type=image --output result.png
+```
