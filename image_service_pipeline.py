@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 # ==================== 配置 ====================
 
-IMAGE_OUTPUT_DIR = Path("/home/jeefy/AV/ZIT-service/data/images/")
+IMAGE_OUTPUT_DIR = Path("/mnt/data/AV/ZIT-service/data/images/")
 CALLBACK_URL = 'http://localhost:8765/task_complete'
 IDLE_TIMEOUT = 60 * 30  # 30 分钟
 
