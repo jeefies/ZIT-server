@@ -118,7 +118,7 @@ def main():
         if MODE == "t2i":
             logger.info("加载 t2i pipeline...")
             pipe = ZImagePipeline.from_pretrained(
-                "Tongyi-MAI/Z-Image-Turbo",
+                "/home/jeefy/.cache/modelscope/models/Tongyi-MAI--Z-Image-Turbo/snapshots/master",
                 torch_dtype=torch.bfloat16,
                 local_files_only=True,
                 low_cpu_mem_usage=False,
@@ -126,7 +126,7 @@ def main():
         else:  # i2i
             logger.info("加载 i2i pipeline...")
             pipe = ZImageInpaintPipeline.from_pretrained(
-                "Tongyi-MAI/Z-Image-Turbo",
+                "/home/jeefy/.cache/modelscope/models/Tongyi-MAI--Z-Image-Turbo/snapshots/master",
                 torch_dtype=torch.bfloat16,
                 local_files_only=True,
                 low_cpu_mem_usage=False,
